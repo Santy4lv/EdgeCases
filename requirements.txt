@@ -1,2 +1,10 @@
 anthropic>=0.30.0
 pillow>=10.0.0
+
+
+# -- ocr_markdown.py --------------------------------------------------
+customtkinter>=5.2.0
+google-generativeai>=0.7.0
+pytesseract>=0.3.10
+easyocr>=1.7.0
+python-dotenv>=1.0.0
