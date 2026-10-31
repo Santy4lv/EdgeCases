@@ -3,22 +3,25 @@ human_typer.py — Simulador de tipeo humano para editores de código web
 Repositorio: IeeXtreme/EdgeCases
 
 Diseñado y optimizado para CS Academy, HackerRank, LeetCode, Codeforces, Monaco, Ace y CodeMirror.
-Novedades:
-  1. Editor de Código Visual Estilo IDE (NetBeans / VS Code):
+Características principales:
+  1. Detección visual de líneas modificadas (Git-diff / IDE style):
+     - Al editar o retocar cualquier línea antes de iniciar, la línea se resalta en ámbar cálido.
+     - La canaleta (Gutter) marca con '~' y color ámbar brillante las líneas tocadas.
+     - Contador interactivo en la barra superior con lista de líneas modificadas y botón para fijar base.
+  2. Editor de Código Visual Estilo IDE (NetBeans / VS Code):
      - Canaleta lateral (Gutter) con números de línea sincronizados al scroll.
      - Resaltado de sintaxis en tiempo real para C++ y Java (palabras clave, tipos, directivas, strings, comentarios y números).
      - Fuente monoespaciada de alta legibilidad (Consolas / Cascadia Code).
-  2. Formateador Automático Pre-Tipeo (Format Code):
+  3. Formateador Automático Pre-Tipeo (Format Code):
      - Botón visible en barra superior del editor y atajo global Alt + Shift + F.
-     - clang-format si está disponible en el sistema.
-     - Formateador nativo en Python (normalización de llaves, sangría a 4 espacios por nivel,
-       separación de sentencias en llaves y eliminación de líneas vacías redundantes).
-  3. Neutralización inmediata de auto-cierre con Supr (Key.delete).
-  4. Tipeo 100% literal carácter por carácter (sin omisiones de llaves o corchetes).
-  5. Cierre automático de sugerencias con Esc (evita #include pegado en línea 1).
-  6. Kill switch global (Esc físico o ratón a esquina sup-izq).
+     - clang-format si está disponible; fallback a normalizador sintáctico nativo en Python.
+  4. Neutralización inmediata de auto-cierre con Supr (Key.delete).
+  5. Tipeo 100% literal carácter por carácter (sin omisiones de llaves o corchetes).
+  6. Cierre automático de sugerencias con Esc (evita #include pegado en línea 1).
+  7. Kill switch global seguro (Esc físico o ratón a esquina sup-izq).
 """
 
+import difflib
 import math
 import random
 import re
@@ -418,7 +421,8 @@ class HumanTypingEngine:
 class VisualCodeEditor(ctk.CTkFrame):
     """
     Editor de código profesional estilo NetBeans / VS Code:
-    - Canaleta izquierda con números de línea sincronizados al scroll.
+    - Canaleta izquierda con números de línea y marcas de modificación '~'.
+    - Detección precisa de líneas modificadas/tocadas mediante difflib.
     - Resaltado de sintaxis en tiempo real para C++ / Java.
     - Fuente monoespaciada Consolas/Cascadia Code.
     """
@@ -430,6 +434,11 @@ class VisualCodeEditor(ctk.CTkFrame):
         self._highlight_timer: Optional[str] = None
         self._on_change_callbacks: list[Callable[[], None]] = []
 
+        # Estado de seguimiento de líneas modificadas
+        self.baseline_lines: list[str] = []
+        self.modified_lines: set[int] = set()
+        self._is_internal_update: bool = False
+
         self._build_editor()
 
     def _build_editor(self) -> None:
@@ -438,11 +447,11 @@ class VisualCodeEditor(ctk.CTkFrame):
 
         editor_font = (self.font_family, self.font_size)
 
-        # Canaleta izquierda para números de línea
+        # Canaleta izquierda para números de línea y marcas '~'
         self.gutter = tk.Text(
             self,
-            width=4,
-            padx=6,
+            width=5,
+            padx=4,
             pady=8,
             takefocus=0,
             border=0,
@@ -490,7 +499,7 @@ class VisualCodeEditor(ctk.CTkFrame):
         # Redireccionar scroll de rueda en gutter hacia el texto principal
         self.gutter.bind("<MouseWheel>", lambda e: self.text.yview_scroll(int(-1 * (e.delta / 120)), "units"))
 
-        # Eventos para actualizar números de línea y sintaxis
+        # Eventos para actualizar números de línea, marcas y sintaxis
         self.text.bind("<<Modified>>", self._on_text_modified)
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<Button-1>", lambda _: self.after(10, self._update_gutter))
@@ -499,17 +508,35 @@ class VisualCodeEditor(ctk.CTkFrame):
         self._update_gutter()
 
     def _configure_syntax_tags(self) -> None:
-        """Define los colores del tema de sintaxis oscuro (One Dark / NetBeans Dark)."""
+        """Define los colores de sintaxis y las marcas de modificación."""
         font_regular = (self.font_family, self.font_size)
         font_italic = (self.font_family, self.font_size, "italic")
         font_bold = (self.font_family, self.font_size, "bold")
 
+        # Tags de sintaxis
         self.text.tag_config("keyword", foreground="#c678dd", font=font_bold)
         self.text.tag_config("type", foreground="#e5c07b")
         self.text.tag_config("preproc", foreground="#e06c75")
         self.text.tag_config("constant", foreground="#d19a66")
         self.text.tag_config("string", foreground="#98c379")
         self.text.tag_config("comment", foreground="#71717a", font=font_italic)
+
+        # Tag de fondo para líneas modificadas / tocadas por el usuario
+        self.text.tag_config("modified_line", background="#242118")
+
+        # Tags de la canaleta (Gutter)
+        self.gutter.tag_config(
+            "gutter_modified",
+            foreground="#fbbf24",       # Ámbar brillante para líneas tocadas
+            background="#2a2415",       # Fondo ámbar oscuro
+            font=font_bold,
+        )
+        self.gutter.tag_config(
+            "gutter_normal",
+            foreground="#52525b",       # Zinc atenuado
+            background="#121215",
+            font=font_regular,
+        )
 
     def _on_text_vscroll(self, *args) -> None:
         """Sincroniza la canaleta de números de línea con el scroll del texto."""
@@ -522,13 +549,52 @@ class VisualCodeEditor(ctk.CTkFrame):
         self.gutter.yview(*args)
 
     def _on_key_release(self, event=None) -> None:
+        self._recalculate_diff()
         self._update_gutter()
         self._schedule_highlight()
 
     def _on_text_modified(self, event=None) -> None:
         self.text.edit_modified(False)
+        if self._is_internal_update:
+            return
+
+        current_text = self.get_text()
+        # Si el texto está totalmente vacío, limpiamos la base
+        if not current_text.strip():
+            self.baseline_lines.clear()
+            self.modified_lines.clear()
+        else:
+            self._recalculate_diff()
+
         self._update_gutter()
         self._schedule_highlight()
+        for cb in self._on_change_callbacks:
+            cb()
+
+    def _recalculate_diff(self) -> None:
+        """Compara las líneas actuales contra la versión base para identificar modificaciones."""
+        current_lines = self.get_text().splitlines()
+
+        # Si aún no hay base establecida y ya hay código, inicializar base con el primer bloque
+        if not self.baseline_lines:
+            if current_lines:
+                self.baseline_lines = list(current_lines)
+            self.modified_lines.clear()
+            return
+
+        matcher = difflib.SequenceMatcher(None, self.baseline_lines, current_lines)
+        mods = set()
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in ("replace", "insert"):
+                for line_no in range(j1 + 1, j2 + 1):
+                    mods.add(line_no)
+        self.modified_lines = mods
+
+    def reset_baseline(self) -> None:
+        """Establece el código actual como la nueva base y limpia todas las marcas de modificación."""
+        self.baseline_lines = self.get_text().splitlines()
+        self.modified_lines.clear()
+        self._update_gutter()
         for cb in self._on_change_callbacks:
             cb()
 
@@ -539,18 +605,37 @@ class VisualCodeEditor(ctk.CTkFrame):
         self._highlight_timer = self.after(120, self.highlight_syntax)
 
     def _update_gutter(self) -> None:
-        """Calcula y actualiza los números de línea."""
+        """Calcula y actualiza los números de línea y las marcas de modificación en la canaleta."""
         line_count = int(self.text.index("end-1c").split(".")[0])
-        gutter_width = max(3, len(str(line_count)) + 1)
+        gutter_width = max(5, len(str(line_count)) + 3)
         self.gutter.config(width=gutter_width)
 
-        numbers = "\n".join(str(i) for i in range(1, line_count + 1))
         self.gutter.config(state="normal")
         self.gutter.delete("1.0", "end")
-        self.gutter.insert("1.0", numbers)
+
+        # Limpiar tags previos de fondo de líneas modificadas en el editor
+        self.text.tag_remove("modified_line", "1.0", "end")
+
+        for line_no in range(1, line_count + 1):
+            is_mod = line_no in self.modified_lines
+            line_str = str(line_no)
+            if is_mod:
+                # Indicador en la canaleta: marcador ámbar brillante con '~'
+                marker_text = f"~{line_str:>{gutter_width - 2}}\n"
+                self.gutter.insert(f"{line_no}.0", marker_text, "gutter_modified")
+
+                # Resaltado sutil en el editor de texto
+                self.text.tag_add("modified_line", f"{line_no}.0", f"{line_no}.end + 1c")
+            else:
+                marker_text = f" {line_str:>{gutter_width - 2}}\n"
+                self.gutter.insert(f"{line_no}.0", marker_text, "gutter_normal")
+
         self.gutter.config(state="disabled")
 
-        # Asegurar alineación vertical con el texto
+        # Asegurar que el fondo modificado quede por debajo de los colores de sintaxis
+        self.text.tag_lower("modified_line")
+
+        # Sincronizar posición vertical
         y_pos = self.text.yview()[0]
         self.gutter.yview_moveto(y_pos)
 
@@ -560,7 +645,6 @@ class VisualCodeEditor(ctk.CTkFrame):
         if not content:
             return
 
-        # Limpiar tags previos
         for tag in SYNTAX_PATTERNS.keys():
             self.text.tag_remove(tag, "1.0", "end")
 
@@ -570,7 +654,6 @@ class VisualCodeEditor(ctk.CTkFrame):
                 end = f"1.0 + {match.end()} chars"
                 self.text.tag_add(tag, start, end)
 
-        # Aplicar ordenadamente (comentarios al final para sobreescribir)
         apply_regex(SYNTAX_PATTERNS["keyword"], "keyword")
         apply_regex(SYNTAX_PATTERNS["type"], "type")
         apply_regex(SYNTAX_PATTERNS["constant"], "constant")
@@ -584,11 +667,24 @@ class VisualCodeEditor(ctk.CTkFrame):
     def get_text(self) -> str:
         return self.text.get("1.0", "end-1c")
 
-    def set_text(self, new_text: str) -> None:
-        self.text.delete("1.0", "end")
-        self.text.insert("1.0", new_text)
+    def set_text(self, new_text: str, update_baseline: bool = False) -> None:
+        self._is_internal_update = True
+        try:
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", new_text)
+        finally:
+            self._is_internal_update = False
+
+        if update_baseline or not self.baseline_lines:
+            self.baseline_lines = new_text.splitlines()
+            self.modified_lines.clear()
+        else:
+            self._recalculate_diff()
+
         self._update_gutter()
         self.highlight_syntax()
+        for cb in self._on_change_callbacks:
+            cb()
 
 
 # ──────────────────────────────────────────────
@@ -600,8 +696,8 @@ class HumanTyperApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Human Typer  ·  CS Academy & Web Code Editor Suite")
-        self.geometry("900x820")
-        self.minsize(820, 720)
+        self.geometry("920x840")
+        self.minsize(840, 740)
 
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
@@ -635,7 +731,7 @@ class HumanTyperApp(ctk.CTk):
         ).pack(side="left")
         ctk.CTkLabel(
             header,
-            text="Simulador de cadencia humana con editor IDE y formateo previo",
+            text="Simulador de cadencia humana con editor IDE, marcas de edición y formateo previo",
             font=ctk.CTkFont(size=12),
             text_color="gray65",
         ).pack(side="left", padx=14)
@@ -646,30 +742,59 @@ class HumanTyperApp(ctk.CTk):
         editor_container.grid_columnconfigure(0, weight=1)
         editor_container.grid_rowconfigure(1, weight=1)
 
-        # Barra superior del editor (Toolbar con botón Format)
-        toolbar = ctk.CTkFrame(editor_container, fg_color="transparent", height=32)
+        # Barra superior del editor (Toolbar con badge de modificaciones, reset y formateo)
+        toolbar = ctk.CTkFrame(editor_container, fg_color="transparent", height=34)
         toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 4))
         toolbar.grid_columnconfigure(1, weight=1)
 
+        # Título y estado de modificaciones
+        left_sub = ctk.CTkFrame(toolbar, fg_color="transparent")
+        left_sub.grid(row=0, column=0, sticky="w")
+
         ctk.CTkLabel(
-            toolbar,
+            left_sub,
             text="🗎 Código Fuente (C++ / Java):",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="gray75",
-        ).grid(row=0, column=0, sticky="w")
+            text_color="gray85",
+        ).pack(side="left", padx=(0, 10))
 
-        # Badge de estado de formateo
+        # Badge interactivo de líneas tocadas
+        self.lbl_modified_info = ctk.CTkLabel(
+            left_sub,
+            text="✓ Sin modificaciones",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#71717a",
+        )
+        self.lbl_modified_info.pack(side="left", padx=(0, 8))
+
+        # Botón para fijar la base actual o limpiar marcas
+        self.btn_reset_marks = ctk.CTkButton(
+            left_sub,
+            text="📌 Fijar base",
+            font=ctk.CTkFont(size=11),
+            height=26,
+            width=100,
+            command=self._on_reset_marks,
+            fg_color="#27272a",
+            hover_color="#3f3f46",
+            state="disabled",
+        )
+        self.btn_reset_marks.pack(side="left")
+
+        # Zona derecha de la toolbar (Badge de formateo + Botón de formateo)
+        right_sub = ctk.CTkFrame(toolbar, fg_color="transparent")
+        right_sub.grid(row=0, column=1, sticky="e")
+
         self.lbl_format_badge = ctk.CTkLabel(
-            toolbar,
+            right_sub,
             text="",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#4ade80",
         )
-        self.lbl_format_badge.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        self.lbl_format_badge.pack(side="left", padx=(0, 10))
 
-        # Botón Formatear Código
         self.btn_format = ctk.CTkButton(
-            toolbar,
+            right_sub,
             text="✨ Formatear Código (Alt+Shift+F)",
             font=ctk.CTkFont(size=12, weight="bold"),
             height=28,
@@ -678,9 +803,9 @@ class HumanTyperApp(ctk.CTk):
             fg_color="#2563eb",
             hover_color="#1d4ed8",
         )
-        self.btn_format.grid(row=0, column=2, sticky="e")
+        self.btn_format.pack(side="left")
 
-        # Instancia del editor visual con canaleta y sintaxis
+        # Instancia del editor visual con canaleta, marcas y sintaxis
         self.editor = VisualCodeEditor(editor_container)
         self.editor.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
         self.editor.add_on_change_callback(self._update_text_stats)
@@ -778,7 +903,7 @@ class HumanTyperApp(ctk.CTk):
 
         self.lbl_status = ctk.CTkLabel(
             prog_frame,
-            text="Listo · Pega el código, formatéalo si lo deseas y pulsa Iniciar tipeo.",
+            text="Listo · Pega el código, edita o formatea según necesites y pulsa Iniciar tipeo.",
             font=ctk.CTkFont(size=12),
             text_color="gray65",
         )
@@ -854,15 +979,19 @@ class HumanTyperApp(ctk.CTk):
             return
 
         formatted, engine_name = format_code(raw_code)
-        self.editor.set_text(formatted)
+        # Mantener la base original para poder ver qué líneas ajustó el formateador
+        self.editor.set_text(formatted, update_baseline=False)
 
-        # Mostrar aviso de éxito en el badge
-        badge_msg = f"✓ Código formateado correctamente ({engine_name})"
+        badge_msg = f"✓ Formateado ({engine_name})"
         self.lbl_format_badge.configure(text=badge_msg)
         self._set_status(f"✨ Formateo completado mediante {engine_name}.", "#4ade80")
 
-        # Desvanecer el badge tras 3.5 segundos
         self.after(3500, lambda: self.lbl_format_badge.configure(text=""))
+
+    def _on_reset_marks(self) -> None:
+        """Restablece el código actual como la nueva base y borra las marcas."""
+        self.editor.reset_baseline()
+        self._set_status("📌 Base fijada: marcas de modificación restablecidas.", "#38bdf8")
 
     # ── Sincronización de Controles ───────────
     def _sync_code_mode_state(self) -> None:
@@ -884,8 +1013,30 @@ class HumanTyperApp(ctk.CTk):
         chars = len(content)
         words = len(content.split())
         lines = len(content.splitlines()) if content else 0
+        mods = self.editor.modified_lines
+        mod_count = len(mods)
+
+        # Actualizar badge de modificaciones en la barra superior
+        if mod_count > 0:
+            lines_preview = ", ".join(str(l) for l in sorted(mods)[:6])
+            if mod_count > 6:
+                lines_preview += f"... (+{mod_count - 6})"
+            self.lbl_modified_info.configure(
+                text=f"✎ {mod_count} línea(s) tocada(s): [{lines_preview}]",
+                text_color="#fbbf24",
+            )
+            self.btn_reset_marks.configure(state="normal")
+        else:
+            self.lbl_modified_info.configure(
+                text="✓ Sin modificaciones",
+                text_color="#71717a",
+            )
+            self.btn_reset_marks.configure(state="disabled")
+
+        # Barra inferior de estadísticas
+        mod_suffix = f" · {mod_count} tocadas" if mod_count > 0 else ""
         self.lbl_stats.configure(
-            text=f"{chars} caracteres · {words} palabras · {lines} líneas"
+            text=f"{chars} caracteres · {words} palabras · {lines} líneas{mod_suffix}"
         )
 
     # ── Flujo de Ejecución ────────────────────
