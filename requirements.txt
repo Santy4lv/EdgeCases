@@ -13,3 +13,4 @@ python-dotenv>=1.0.0
 # -- human_typer.py --
 pynput>=1.7.6
 pyautogui>=0.9.54       # opcional: FAILSAFE por esquina del ratón
+playwright>=1.40.0      # opcional: inyección autónoma en segundo plano sin bloquear teclado
