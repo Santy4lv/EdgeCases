@@ -1,10 +1,15 @@
 anthropic>=0.30.0
 pillow>=10.0.0
 
-
-# -- ocr_markdown.py --------------------------------------------------
+# -- GUI compartida --
 customtkinter>=5.2.0
+
+# -- ocr_markdown.py --
 google-generativeai>=0.7.0
 pytesseract>=0.3.10
 easyocr>=1.7.0
 python-dotenv>=1.0.0
+
+# -- human_typer.py --
+pynput>=1.7.6
+pyautogui>=0.9.54       # opcional: FAILSAFE por esquina del ratón
